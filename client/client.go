@@ -54,7 +54,7 @@ func main() {
 	fmt.Println("欢迎您加入聊天室。")
 
 	// 创建一个协程接收服务端发送的消息
-	go ReceiveMessages(conn)
+	go receiveMessages(conn)
 
 	// 循环读取用户输入并发送消息
 	for {
@@ -69,13 +69,17 @@ func main() {
 				fmt.Fprintf(conn, "exit\n") // 发送退出信号
 				break
 			}
+			if message == "all" {
+				fmt.Fprintf(conn, "all\n") // 发出查看所有排名的信号
+				continue
+			}
 			fmt.Fprintf(conn, "%s\n", message)
 		}
 	}
 }
 
-// ReceiveMessages 接收服务端发送的消息
-func ReceiveMessages(conn net.Conn) {
+// 接收服务端发送的消息
+func receiveMessages(conn net.Conn) {
 	for {
 		// 尝试读取服务端消息
 		message, err2 := bufio.NewReader(conn).ReadString('\n')
