@@ -15,16 +15,14 @@ func main() {
 		fmt.Println("连接服务端失败！其原因是:", err)
 		return
 	}
-	defer func() {
-		conn.Close()
-	}()
+	defer conn.Close()
 
 	// 获取用户输入的网名
 	reader := bufio.NewReader(os.Stdin)
 
 	// 将网名发送给服务端
 	for {
-		fmt.Print("请输出您的姓名: ")
+		fmt.Print("请输入您的姓名: ")
 		name, err := reader.ReadString('\n')
 		if err != nil {
 			fmt.Println("读取用户姓名失败！其原因是:", err)
@@ -69,7 +67,6 @@ func main() {
 		if message != "" {
 			if message == "exit" {
 				fmt.Fprintf(conn, "exit\n") // 发送退出信号
-
 				break
 			}
 			fmt.Fprintf(conn, "%s\n", message)
