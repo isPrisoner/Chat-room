@@ -42,8 +42,11 @@ var logFile *os.File
 // 创建一个redis客户端实例
 var rdb *redis.Client
 
-// 为redis提供一个传入请求的顶级上下文
+// 为redis提供一个传入请求的上下文
 var ctx = context.Background()
+
+var streamName = "聊天流"
+var groupName = "聊天组"
 
 func newUserListStruct() *userListStruct {
 	return &userListStruct{
@@ -119,6 +122,11 @@ func redisInit() {
 		Password: "xiaomu@303",
 		DB:       0,
 	})
+
+	_, err := rdb.XGroupCreateMkStream(ctx, streamName, groupName, "$").Result()
+	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP Consumer Group name already exists") {
+		log.Fatal("创建聊天组失败！其原因是：", err)
+	}
 }
 
 // 更新用户活跃度，每次加1
@@ -175,6 +183,17 @@ func deleteAll() {
 	}
 }
 
+// 发送消息到 Redis 流
+func sendMessageToStream(message string) {
+	_, err := rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamName,
+		Values: map[string]interface{}{"message": message},
+	}).Result()
+	if err != nil {
+		log.Error("推送消息到Redis流失败！其原因是：", err)
+	}
+}
+
 func main() {
 
 	redisInit()
@@ -194,22 +213,18 @@ func main() {
 	// 程序结束时，关闭日志文件
 	defer closeLogFile()
 
+	// 启动监听 Redis 流的协程，监听并处理来自流的消息
+	go listenToStream()
+
 	// 创建一个协程用于接收客户端连接请求
 	go handleConnections(listener)
 
 	// 启动命令交互协程
 	go handleServerCommands()
 
+	// 将接收到的消息发送到 Redis 流
 	for message := range messageChan {
-		// 将消息广播到所有连接的客户端
-		for _, user := range userList.getUsers() {
-			date, err := proto.Encode(message)
-			if err != nil {
-				fmt.Println("编码失败！其原因是：", err)
-				return
-			}
-			user.Conn.Write(date)
-		}
+		sendMessageToStream(message)
 	}
 
 }
@@ -256,7 +271,6 @@ func handleClient(conn net.Conn) {
 	}
 
 	// 记录用户加入信息
-	log.Infof("欢迎%s加入了聊天室。", name)
 	messageChan <- fmt.Sprintf("欢迎%s加入了聊天室。", name) // 广播加入信息
 
 	receiveMessages(conn, name)
@@ -274,7 +288,6 @@ func receiveMessages(conn net.Conn, name string) {
 		message = strings.TrimSpace(message)
 
 		if message == "exit" { // 处理退出信号
-			log.Infof("%s离开了聊天室。", name)
 			messageChan <- fmt.Sprintf("%s离开了聊天室。", name)
 			userList.userDelete(name)
 			deleteUser(name)
@@ -288,6 +301,7 @@ func receiveMessages(conn net.Conn, name string) {
 			for i, user := range allUsers {
 				result = result + strconv.Itoa(i+1) + ". " + user + "\n"
 			}
+
 			date, err := proto.Encode(result)
 			if err != nil {
 				fmt.Println("编码失败！其原因是：", err)
@@ -299,19 +313,7 @@ func receiveMessages(conn net.Conn, name string) {
 		// 每次接收到消息后，更新活跃度
 		updateUserActivity(name)
 
-		log.Infof("%s: %s", name, message)
-
-		message = name + ":" + message
-		for _, user := range userList.getUsers() {
-			if user.Name != name {
-				date, err := proto.Encode(message)
-				if err != nil {
-					fmt.Println("编码失败！其原因是：", err)
-					return
-				}
-				user.Conn.Write(date)
-			}
-		}
+		sendMessageToStream(name + ": " + message)
 	}
 }
 
@@ -358,5 +360,50 @@ func handleServerCommands() {
 		default:
 			fmt.Println("无效命令!!!")
 		}
+	}
+}
+
+// 监听 Redis 流并处理消息
+func listenToStream() {
+	for {
+		messages, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+			Group:    groupName,
+			Consumer: "server-consumer",
+			Streams:  []string{streamName, ">"},
+			Block:    0,
+			Count:    10,
+		}).Result()
+		if err != nil {
+			log.Error("从 Redis 流中读取消息失败！其原因是:", err)
+			continue
+		}
+
+		for _, message := range messages {
+			for _, xMessage := range message.Messages {
+				messageContent := xMessage.Values["message"].(string)
+				log.Infof("接收到消息: %s", messageContent)
+
+				// 处理接收到的消息，并广播给所有客户端
+				broadcastMessage(messageContent)
+
+				// 确认消息已处理
+				_, err := rdb.XAck(ctx, streamName, groupName, xMessage.ID).Result()
+				if err != nil {
+					log.Error("确认消息失败！其原因是:", err)
+				}
+			}
+		}
+	}
+}
+
+// 广播消息到所有连接的客户端
+func broadcastMessage(message string) {
+	for _, user := range userList.getUsers() {
+		date, err := proto.Encode(message)
+		if err != nil {
+			fmt.Println("编码失败！其原因是：", err)
+			return
+		}
+		user.Conn.Write(date)
 	}
 }
