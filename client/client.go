@@ -1,6 +1,7 @@
 package main
 
 import (
+	"Chat-room/proto"
 	"bufio"
 	"fmt"
 	"net"
@@ -10,7 +11,7 @@ import (
 
 func main() {
 	// 连接到服务端
-	conn, err := net.Dial("tcp", "localhost:8082")
+	conn, err := net.Dial("tcp", "localhost:8081")
 	if err != nil {
 		fmt.Println("连接服务端失败！其原因是:", err)
 		return
@@ -36,10 +37,15 @@ func main() {
 		}
 
 		// 将网名发送给服务端
-		fmt.Fprintf(conn, "%s\n", name)
+		date, err := proto.Encode(name)
+		if err != nil {
+			fmt.Println("编码失败！其原因是：", err)
+			return
+		}
+		conn.Write(date)
 
 		// 检查服务端的回复
-		response, err2 := bufio.NewReader(conn).ReadString('\n')
+		response, err2 := proto.Decode(bufio.NewReader(conn))
 		if err2 != nil {
 			fmt.Println("读取服务端消息失败！其原因是:", err2)
 			return
@@ -66,14 +72,29 @@ func main() {
 		message = strings.TrimSpace(message)
 		if message != "" {
 			if message == "exit" {
-				fmt.Fprintf(conn, "exit\n") // 发送退出信号
+				date, err := proto.Encode("exit\n")
+				if err != nil {
+					fmt.Println("编码失败！其原因是：", err)
+					return
+				}
+				conn.Write(date)
 				break
 			}
 			if message == "all" {
-				fmt.Fprintf(conn, "all\n") // 发出查看所有排名的信号
+				date, err := proto.Encode("all\n")
+				if err != nil {
+					fmt.Println("编码失败！其原因是：", err)
+					return
+				}
+				conn.Write(date)
 				continue
 			}
-			fmt.Fprintf(conn, "%s\n", message)
+			date, err := proto.Encode(message)
+			if err != nil {
+				fmt.Println("编码失败！其原因是：", err)
+				return
+			}
+			conn.Write(date)
 		}
 	}
 }
@@ -82,7 +103,7 @@ func main() {
 func receiveMessages(conn net.Conn) {
 	for {
 		// 尝试读取服务端消息
-		message, err2 := bufio.NewReader(conn).ReadString('\n')
+		message, err2 := proto.Decode(bufio.NewReader(conn))
 		if err2 != nil {
 			if strings.Contains(err2.Error(), "use of closed network connection") {
 				fmt.Println("连接已关闭，停止接收消息")

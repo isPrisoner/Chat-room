@@ -1,6 +1,7 @@
 package main
 
 import (
+	"Chat-room/proto"
 	"bufio"
 	"context"
 	"errors"
@@ -21,6 +22,7 @@ type User struct {
 	Conn net.Conn
 }
 
+// 用户列表结构体
 type userListStruct struct {
 	users     map[string]*User
 	userMutex sync.Mutex
@@ -33,6 +35,9 @@ var messageChan = make(chan string)
 
 // 初始化日志记录器
 var log = logrus.New()
+
+// 保护日志文件对象
+var logFile *os.File
 
 // 创建一个redis客户端实例
 var rdb *redis.Client
@@ -82,6 +87,7 @@ func (uls *userListStruct) getUsers() map[string]*User {
 	return uls.users
 }
 
+// 日志配置
 func logInit() {
 	log.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp: true,
@@ -92,11 +98,21 @@ func logInit() {
 		log.Fatal("打开日志文件失败！其原因是:", err)
 		return
 	}
-	defer file.Close()
 
 	log.SetOutput(io.MultiWriter(os.Stdout, file))
 }
 
+// 程序退出时显示关闭日志文件
+func closeLogFile() {
+	if logFile != nil {
+		err := logFile.Close()
+		if err != nil {
+			log.Error("关闭日志文件失败！其原因是：", err)
+		}
+	}
+}
+
+// redis配置
 func redisInit() {
 	rdb = redis.NewClient(&redis.Options{
 		Addr:     "182.42.110.229:6379",
@@ -151,20 +167,32 @@ func deleteUser(name string) {
 	}
 }
 
+// 删除数据库所有数据
+func deleteAll() {
+	_, err := rdb.ZRemRangeByRank(ctx, "活跃度排行榜", 0, -1).Result()
+	if err != nil {
+		log.Error("删除所有数据失败！其原因是：", err)
+	}
+}
+
 func main() {
 
 	redisInit()
 	userList = newUserListStruct()
 	logInit()
 
-	// 监听 8082 端口
-	listener, err2 := net.Listen("tcp", ":8082")
+	// 监听 8081 端口
+	listener, err2 := net.Listen("tcp", ":8081")
 	if err2 != nil {
 		log.Fatal("监听失败！其原因是:", err2)
 		return
 	}
 	defer listener.Close()
-	log.Info("已成功连接8082端口！")
+	deleteAll()
+	log.Info("已成功连接8081端口！")
+
+	// 程序结束时，关闭日志文件
+	defer closeLogFile()
 
 	// 创建一个协程用于接收客户端连接请求
 	go handleConnections(listener)
@@ -175,7 +203,12 @@ func main() {
 	for message := range messageChan {
 		// 将消息广播到所有连接的客户端
 		for _, user := range userList.getUsers() {
-			fmt.Fprintf(user.Conn, "%s\n", message)
+			date, err := proto.Encode(message)
+			if err != nil {
+				fmt.Println("编码失败！其原因是：", err)
+				return
+			}
+			user.Conn.Write(date)
 		}
 	}
 
@@ -199,7 +232,8 @@ func handleClient(conn net.Conn) {
 	var name string
 
 	for {
-		nameInput, err := reader.ReadString('\n')
+		nameInput, err := proto.Decode(reader)
+		//nameInput, err := reader.ReadString('\n')
 		if err != nil {
 			log.Error("读取客户端姓名失败！其原因是:", err)
 			conn.Close()
@@ -208,7 +242,12 @@ func handleClient(conn net.Conn) {
 		name = strings.TrimSpace(nameInput)
 
 		if userList.isExistsName(name) {
-			fmt.Fprintf(conn, "ERROR: 用户名重复!!!\n") // 修改提示信息前缀
+			date, err := proto.Encode("ERROR: 用户名重复!!!\n")
+			if err != nil {
+				fmt.Println("编码失败！其原因是：", err)
+				return
+			}
+			conn.Write(date)
 			continue
 		} else {
 			userList.userAdd(name, conn)
@@ -227,12 +266,9 @@ func handleClient(conn net.Conn) {
 func receiveMessages(conn net.Conn, name string) {
 	defer conn.Close()
 	for {
-		message, err := bufio.NewReader(conn).ReadString('\n')
+		message, err := proto.Decode(bufio.NewReader(conn))
 		if err != nil {
 			log.Warnf("读取%s的信息失败！其原因是: %v", name, err)
-			userList.userDelete(name)
-			log.Infof("%s离开了聊天室。", name)
-			messageChan <- fmt.Sprintf("%s离开了聊天室。", name)
 			return
 		}
 		message = strings.TrimSpace(message)
@@ -241,6 +277,7 @@ func receiveMessages(conn net.Conn, name string) {
 			log.Infof("%s离开了聊天室。", name)
 			messageChan <- fmt.Sprintf("%s离开了聊天室。", name)
 			userList.userDelete(name)
+			deleteUser(name)
 			return
 		}
 		if message == "all" { // 处理查看信号
@@ -251,7 +288,12 @@ func receiveMessages(conn net.Conn, name string) {
 			for i, user := range allUsers {
 				result = result + strconv.Itoa(i+1) + ". " + user + "\n"
 			}
-			fmt.Fprintf(conn, result)
+			date, err := proto.Encode(result)
+			if err != nil {
+				fmt.Println("编码失败！其原因是：", err)
+				return
+			}
+			conn.Write(date)
 		}
 
 		// 每次接收到消息后，更新活跃度
@@ -259,9 +301,15 @@ func receiveMessages(conn net.Conn, name string) {
 
 		log.Infof("%s: %s", name, message)
 
+		message = name + ":" + message
 		for _, user := range userList.getUsers() {
 			if user.Name != name {
-				fmt.Fprintf(user.Conn, "%s: %s\n", name, message)
+				date, err := proto.Encode(message)
+				if err != nil {
+					fmt.Println("编码失败！其原因是：", err)
+					return
+				}
+				user.Conn.Write(date)
 			}
 		}
 	}

@@ -27,6 +27,7 @@
         <method importPath="os" receiver="*File" name="Close" />
         <method importPath="net" receiver="Listener" name="Close" />
         <method importPath="net" receiver="Conn" name="Close" />
+        <method importPath="net" receiver="Conn" name="Write" />
       </methods>
     </inspection_tool>
   </profile>
